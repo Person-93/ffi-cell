@@ -1,0 +1,13 @@
+[package]
+name = "ffi-cell"
+authors = ["person93 <person93.person93@gmail.com>"]
+version = "0.0.0"
+edition = "2024"
+description = "Lend objects across ffi boundaries"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[lints.clippy]
+dbg_macro = "warn"
