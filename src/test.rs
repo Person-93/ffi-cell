@@ -9,17 +9,16 @@ fn test() {
   );
 
   let mut value = 42;
-  let value_ptr: *const i32 = &value;
+  let value_ptr: *const i32 = &raw const value;
 
-  unsafe {
-    cell.lend(&mut value);
-  }
+  // SAFETY: value is not referenced until after calling `reclaim` below
+  unsafe { cell.lend(&mut value) };
   let ptr: *const _ = cell.ptr.load(Ordering::SeqCst);
   assert!(!ptr.is_null(), "after loan, pointer should not be null");
   assert_eq!(ptr, value_ptr, "value in cell should match lent value");
 
   let num = cell.borrow();
-  let num_ptr: *const i32 = &*num;
+  let num_ptr: *const i32 = &raw const *num;
   assert_eq!(
     num_ptr, value_ptr,
     "borrowed value should match stored value"
@@ -54,7 +53,7 @@ fn test() {
     );
 
     let num = cell.borrow();
-    let num_ptr: *const _ = &*num;
+    let num_ptr: *const _ = &raw const *num;
     assert_eq!(
       cell.ptr.load(Ordering::SeqCst),
       IN_USE_SENTINEL.cast(),

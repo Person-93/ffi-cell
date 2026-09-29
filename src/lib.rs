@@ -13,6 +13,7 @@ use derive_more::{Display, Error, From};
 #[cfg(test)]
 mod test;
 
+#[expect(clippy::as_conversions, reason = "sentinel value for ptr")]
 const IN_USE_SENTINEL: *mut () = 1 as _;
 
 pub struct FfiCell<T: Sync> {
@@ -34,9 +35,8 @@ impl<T: Sync> FfiCell<T> {
     object: &mut T,
     f: impl FnOnce() -> R,
   ) -> Result<R, Error> {
-    unsafe {
-      self.try_lend(object)?;
-    }
+    // SAFETY: reclaim is called by the ScopeGuard
+    unsafe { self.try_lend(object)? };
     let _reclaim = ScopeGuard::new(|| self.reclaim());
     Ok(f())
   }
@@ -47,7 +47,8 @@ impl<T: Sync> FfiCell<T> {
   /// returns `Ok`.
   #[track_caller]
   pub unsafe fn lend(&self, ptr: &mut T) {
-    unsafe { self.try_lend(ptr).unwrap_or_display_err() }
+    // SAFETY: caller upholds guarantees
+    unsafe { self.try_lend(ptr) }.unwrap_or_display_err();
   }
 
   /// # Safety
@@ -95,7 +96,7 @@ impl<T: Sync> FfiCell<T> {
           Ordering::SeqCst,
         ) {
           unreachable!("unexpected pointer: {err:p}")
-        };
+        }
 
         Err(BorrowError::Unavailable)
       },
@@ -104,7 +105,7 @@ impl<T: Sync> FfiCell<T> {
 
   #[track_caller]
   pub fn reclaim(&self) {
-    self.try_reclaim().unwrap_or_display_err()
+    self.try_reclaim().unwrap_or_display_err();
   }
 
   pub fn try_reclaim(&self) -> Result<(), ReclaimError> {
@@ -145,21 +146,23 @@ struct FfiGuard<'g, T: Sync> {
   _marker: PhantomData<&'g ()>,
 }
 
-impl<'g, T: Sync> Deref for FfiGuard<'g, T> {
+impl<T: Sync> Deref for FfiGuard<'_, T> {
   type Target = T;
 
   fn deref(&self) -> &Self::Target {
+    // SAFETY: this guard has the only pointer
     unsafe { self.ptr.as_ref() }
   }
 }
 
-impl<'g, T: Sync> DerefMut for FfiGuard<'g, T> {
+impl<T: Sync> DerefMut for FfiGuard<'_, T> {
   fn deref_mut(&mut self) -> &mut Self::Target {
+    // SAFETY: this guard has the only pointer
     unsafe { self.ptr.as_mut() }
   }
 }
 
-impl<'g, T: Sync> Drop for FfiGuard<'g, T> {
+impl<T: Sync> Drop for FfiGuard<'_, T> {
   fn drop(&mut self) {
     self
       .cell
@@ -219,7 +222,7 @@ impl<F: FnMut()> ScopeGuard<F> {
 
 impl<F: FnMut()> Drop for ScopeGuard<F> {
   fn drop(&mut self) {
-    (self.0)()
+    (self.0)();
   }
 }
 
