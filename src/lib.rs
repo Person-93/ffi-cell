@@ -3,7 +3,7 @@ use std::{
   marker::PhantomData,
   ops::{Deref, DerefMut},
   ptr::{NonNull, null_mut},
-  sync::atomic::{AtomicBool, AtomicPtr, Ordering},
+  sync::atomic::{AtomicPtr, Ordering},
 };
 
 use derive_more::{Display, Error, From};
@@ -11,17 +11,15 @@ use derive_more::{Display, Error, From};
 #[cfg(test)]
 mod test;
 
+const IN_USE_SENTINEL: *mut () = 1 as _;
+
 pub struct FfiCell<T: Sync> {
   ptr: AtomicPtr<T>,
-  in_use: AtomicBool,
 }
 
 impl<T: Sync> FfiCell<T> {
   pub const fn new() -> Self {
-    Self {
-      ptr: AtomicPtr::new(null_mut()),
-      in_use: AtomicBool::new(false),
-    }
+    Self { ptr: AtomicPtr::new(null_mut()) }
   }
 
   #[track_caller]
@@ -55,20 +53,20 @@ impl<T: Sync> FfiCell<T> {
   /// `reclaim` is called without panicking or `try_reclaim` is called and
   /// returns `Ok`.
   pub unsafe fn try_lend(&self, ptr: &mut T) -> Result<(), LendError> {
-    // This check does not satisfy the safety requirement.
-    // It is here to provide a better error message.
-    if self.in_use.load(Ordering::SeqCst) {
-      return Err(LendError::AlreadyLent);
-    }
-
-    match self.ptr.compare_exchange(
-      null_mut(),
-      ptr,
-      Ordering::SeqCst,
-      Ordering::SeqCst,
-    ) {
-      Ok(_) => Ok(()),
-      Err(_) => Err(LendError::AlreadyHasLoan),
+    loop {
+      return match self.ptr.compare_exchange(
+        null_mut(),
+        ptr,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+      ) {
+        Ok(_) => Ok(()),
+        Err(ptr) => match ptr_from_raw(ptr) {
+          Ok(_) => Err(LendError::AlreadyHasLoan),
+          Err(RawPtrErr::InUse) => Err(LendError::AlreadyLent),
+          Err(RawPtrErr::Null) => continue,
+        },
+      };
     }
   }
 
@@ -78,18 +76,27 @@ impl<T: Sync> FfiCell<T> {
   }
 
   pub fn try_borrow(&self) -> Result<impl DerefMut<Target = T>, BorrowError> {
-    if self.in_use.swap(true, Ordering::SeqCst) {
-      Err(BorrowError::AlreadyBorrowed)
-    } else {
-      let ptr = self.ptr.swap(null_mut(), Ordering::SeqCst);
-      match NonNull::new(ptr) {
-        Some(ptr) => Ok(FfiGuard {
-          ptr,
-          cell: self,
-          _marker: PhantomData,
-        }),
-        None => Err(BorrowError::Unavailable),
-      }
+    let ptr = self.ptr.swap(IN_USE_SENTINEL.cast(), Ordering::SeqCst);
+    match ptr_from_raw(ptr) {
+      Ok(ptr) => Ok(FfiGuard {
+        ptr,
+        cell: self,
+        _marker: PhantomData,
+      }),
+      Err(RawPtrErr::InUse) => Err(BorrowError::AlreadyBorrowed),
+      Err(RawPtrErr::Null) => {
+        // put the null ptr back in
+        if let Err(err) = self.ptr.compare_exchange(
+          IN_USE_SENTINEL.cast(),
+          null_mut(),
+          Ordering::SeqCst,
+          Ordering::SeqCst,
+        ) {
+          unreachable!("unexpected pointer: {err:p}")
+        };
+
+        Err(BorrowError::Unavailable)
+      },
     }
   }
 
@@ -99,14 +106,29 @@ impl<T: Sync> FfiCell<T> {
   }
 
   pub fn try_reclaim(&self) -> Result<(), ReclaimError> {
-    if self.in_use.load(Ordering::SeqCst) {
-      Err(ReclaimError::InUse)
-    } else if self.ptr.swap(null_mut(), Ordering::SeqCst).is_null() {
-      unreachable!("missing pointer when not in use")
-    } else {
-      Ok(())
+    let ptr = self.ptr.swap(null_mut(), Ordering::SeqCst);
+
+    match ptr_from_raw(ptr) {
+      Ok(_) => Ok(()),
+      Err(RawPtrErr::InUse) => Err(ReclaimError::InUse),
+      Err(RawPtrErr::Null) => unreachable!("missing pointer when not in use"),
     }
   }
+}
+
+fn ptr_from_raw<T>(ptr: *mut T) -> Result<NonNull<T>, RawPtrErr> {
+  match NonNull::new(ptr) {
+    Some(ptr) if ptr.as_ptr().cast() == IN_USE_SENTINEL => {
+      Err(RawPtrErr::InUse)
+    },
+    Some(ptr) => Ok(ptr),
+    None => Err(RawPtrErr::Null),
+  }
+}
+
+enum RawPtrErr {
+  Null,
+  InUse,
 }
 
 impl<T: Sync> Default for FfiCell<T> {
@@ -141,14 +163,12 @@ impl<'g, T: Sync> Drop for FfiGuard<'g, T> {
       .cell
       .ptr
       .compare_exchange(
-        null_mut(),
+        IN_USE_SENTINEL.cast(),
         self.ptr.as_ptr(),
         Ordering::SeqCst,
         Ordering::SeqCst,
       )
       .expect("tried to return lent pointer, but another pointer was there");
-    let was_in_use = self.cell.in_use.swap(false, Ordering::SeqCst);
-    assert!(was_in_use, "object was not in use when it was returned");
   }
 }
 
