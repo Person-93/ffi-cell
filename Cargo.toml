@@ -14,6 +14,7 @@ derive_more = { version = "2.0.1", default-features = false, features = [
 ] }
 
 [lints.rust]
+missing_docs = "warn"
 non_ascii_idents = "forbid"
 unused_unsafe = "warn"
 

@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 #![no_std]
 
 use core::{
@@ -16,20 +17,35 @@ mod test;
 #[expect(clippy::as_conversions, reason = "sentinel value for ptr")]
 const IN_USE_SENTINEL: *mut () = 1 as _;
 
+/// Holds data that can be lent across FFI boundaries. See crate level docs for
+/// details.
 pub struct FfiCell<T: Sync> {
   ptr: AtomicPtr<T>,
 }
 
 impl<T: Sync> FfiCell<T> {
+  /// Create a new [`FfiCell`]
   pub const fn new() -> Self {
     Self { ptr: AtomicPtr::new(null_mut()) }
   }
 
+  /// Run the function with `object` available to be borrowed.
+  ///
+  /// See [`Self::try_run`] for the non-panicking version.
+  ///
+  /// # Panic
+  /// Panics if this cell is already borrowing an object.
   #[track_caller]
   pub fn run<R>(&self, object: &mut T, f: impl FnOnce() -> R) -> R {
     self.try_run(object, f).unwrap_or_display_err()
   }
 
+  /// Run the function with `object` available to be borrowed.
+  ///
+  /// See [`Self::run`] for the panicking version.
+  ///
+  /// # Error
+  /// Returns and error if this cell is already borrowing an object.
   pub fn try_run<R>(
     &self,
     object: &mut T,
@@ -41,6 +57,15 @@ impl<T: Sync> FfiCell<T> {
     Ok(f())
   }
 
+  /// Lend an object to the cell.
+  ///
+  /// See [`Self::run`] for the safe API.
+  ///
+  /// See [`Self::try_lend`] for the non-panicking version.
+  ///
+  /// # Panic
+  /// Panics if this cell is already borrowing an object.
+  ///
   /// # Safety
   /// The object pointed to in the params cannot be referenced until
   /// `reclaim` is called without panicking or `try_reclaim` is called and
@@ -51,6 +76,15 @@ impl<T: Sync> FfiCell<T> {
     unsafe { self.try_lend(ptr) }.unwrap_or_display_err();
   }
 
+  /// Lend an object to the cell.
+  ///
+  /// See [`Self::try_run`] for the safe API.
+  ///
+  /// See [`Self::lend`] for the panicking version.
+  ///
+  /// # Error
+  /// Panics if this cell is already borrowing an object.
+  ///
   /// # Safety
   /// The object pointed to in the params cannot be referenced until
   /// `reclaim` is called without panicking or `try_reclaim` is called and
@@ -73,11 +107,25 @@ impl<T: Sync> FfiCell<T> {
     }
   }
 
+  /// Re-borrow the object that the cell is currently borrowing.
+  ///
+  /// See [`Self::try_borrow`] for the non-panicking version.
+  ///
+  /// # Panic
+  /// Panics if the cell is not currently borrowing anything or if its borrowed
+  /// object is currently reborrowed.
   #[track_caller]
   pub fn borrow(&self) -> impl DerefMut<Target = T> {
     self.try_borrow().unwrap_or_display_err()
   }
 
+  /// Re-borrow the object that the cell is currently borrowing.
+  ///
+  /// See [`Self::borrow`] for the panicking version.
+  ///
+  /// # Error
+  /// Returns an error if the cell is not currently borrowing anything or if
+  /// its borrowed object is currently reborrowed.
   pub fn try_borrow(&self) -> Result<impl DerefMut<Target = T>, BorrowError> {
     let ptr = self.ptr.swap(IN_USE_SENTINEL.cast(), Ordering::SeqCst);
     match ptr_from_raw(ptr) {
@@ -103,11 +151,27 @@ impl<T: Sync> FfiCell<T> {
     }
   }
 
+  /// Reclaim the object that was lent to this cell.
+  ///
+  /// This function should only be called when using the unsafe API.
+  ///
+  /// See [`Self::try_reclaim`] for the non-panicking version.
+  ///
+  /// # Panic
+  /// Panics if the borrowed object is currently re-borrowed.
   #[track_caller]
   pub fn reclaim(&self) {
     self.try_reclaim().unwrap_or_display_err();
   }
 
+  /// Reclaim the object that was lent to this cell.
+  ///
+  /// This function should only be called when using the unsafe API.
+  ///
+  /// See [`Self::reclaim`] for the panicking version.
+  ///
+  /// # Errors
+  /// Returns an error if the borrowed object is currently re-borrowed.
   pub fn try_reclaim(&self) -> Result<(), ReclaimError> {
     let ptr = self.ptr.swap(null_mut(), Ordering::SeqCst);
 
@@ -177,37 +241,51 @@ impl<T: Sync> Drop for FfiGuard<'_, T> {
   }
 }
 
+/// All errors that can occur in this library. Returned by [`FfiCell::try_run`].
 #[non_exhaustive]
 #[derive(Debug, Display, Error, From)]
 pub enum Error {
+  /// An error occurred trying to lend an object to a cell
   LendError(LendError),
+
+  /// An error occurred trying to re-borrow an object from a cell
   BorrowError(BorrowError),
 }
 
+/// Errors that can occur trying to lend an object to a cell
 #[non_exhaustive]
 #[derive(Debug, Display, Error)]
 #[display("cannot lend value to ffi-cell because {_variant}")]
 pub enum LendError {
+  /// The cell is already borrowing an object and it's re-lending it
   #[display("it currently has one and it is already lent out")]
   AlreadyLent,
+
+  /// The cell is already borrowing an object
   #[display("it already has one")]
   AlreadyHasLoan,
 }
 
+/// Errors that can occur trying to borrow an object from a cell
 #[non_exhaustive]
 #[derive(Debug, Display, Error)]
 #[display("cannot borrow value from ffi-cell because {_variant}")]
 pub enum BorrowError {
+  /// The cell is not currently borrowing an object
   #[display("the cell does not have a value")]
   Unavailable,
+
+  /// The cell's object is already re-borrowed
   #[display("the cell's value is already lent out")]
   AlreadyBorrowed,
 }
 
+/// Errors that can occur trying to reclaim an object from a cell
 #[non_exhaustive]
 #[derive(Debug, Display, Error)]
 #[display("cannot reclaim value from ffi-cell because {_variant}")]
 pub enum ReclaimError {
+  /// The object is currently re-borrowed
   #[display("it is currently in use")]
   InUse,
 }
